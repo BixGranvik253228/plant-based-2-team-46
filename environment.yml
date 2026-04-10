@@ -1,0 +1,47 @@
+name: brabanthack
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    # Object detection & vision models
+    - ultralytics
+    - groundingdino-py
+    - transformers
+    - supervision
+    - roboflow
+
+    # Deep learning
+    - torch
+    - torchvision
+
+    # Image processing
+    - opencv-python
+    - albumentations
+
+    # Geospatial & zone mapping
+    - geopandas
+    - shapely
+    - scikit-learn
+
+    # ISOBUS / hardware communication
+    - paho-mqtt
+    - pyserial
+    - pynmea2
+    - python-can
+
+    # AWS & Snowflake
+    - boto3
+    - snowflake-connector-python
+
+    # Web / demo API
+    - flask
+    - fastapi
+    - uvicorn
+
+    # Utilities
+    - matplotlib
+    - jupyter
