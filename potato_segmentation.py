@@ -11,50 +11,102 @@ import os
 # ============================================================================
 # CONFIGURATION - EDIT THESE
 # ============================================================================
-ORIGINAL_IMAGE_PATH = "/path/to/your/image.jpg"  # Original harvest image
-JSON_MASK_PATH = "/path/to/your/masks.json"      # JSON with class labels
+ORIGINAL_IMAGE_PATH = "/path/to/your/image.jpg"  # Original harvest image (from COCO dataset)
+JSON_MASK_PATH = "/path/to/your/dataset.json"   # COCO format JSON file
 OUTPUT_MODEL_PATH = "/home/claude/potato_model.h5"
-IMAGE_HEIGHT = 720
-IMAGE_WIDTH = 1280
-NUM_CLASSES = 5  # stick, rock, big_rock, potato, background
+IMAGE_ID = 0  # Which image from the JSON to use (0-indexed)
+IMAGE_HEIGHT = 360  # From COCO JSON
+IMAGE_WIDTH = 640   # From COCO JSON
+NUM_CLASSES = 5  # stick, Stone, big stone, potato-detection, background
 
-# Class mapping (adjust based on your JSON structure)
+# Class mapping - from COCO JSON categories (id -> name)
 CLASS_MAPPING = {
-    "stick": 0,
-    "rock": 1,
-    "big_rock": 2,
-    "potato": 3,
-    "background": 4
+    0: "potato-detection",  # category_id 0
+    1: "Stone",             # category_id 1
+    2: "big stone",         # category_id 2
+    3: "stick"              # category_id 3
 }
+
+# Create reverse mapping for convenience
+CLASS_NAME_TO_ID = {v: k for k, v in CLASS_MAPPING.items()}
+CLASS_NAME_TO_ID["background"] = 4  # Add background class
 
 # ============================================================================
 # STEP 1: LOAD AND PARSE JSON MASK
 # ============================================================================
-def load_mask_from_json(json_path, image_shape):
+def decode_rle(rle_data, image_size):
+    """Decode RLE (Run-Length Encoding) to binary mask"""
+    counts = rle_data['counts']
+    h, w = image_size
+    
+    if isinstance(counts, str):
+        # String format - decode it
+        mask = np.zeros(h * w, dtype=np.uint8)
+        current_pos = 0
+        current_value = 0
+        
+        i = 0
+        while i < len(counts):
+            # Decode run length
+            run_length = 0
+            power = 1
+            while i < len(counts):
+                char_val = ord(counts[i]) - 48
+                if char_val > 26:
+                    char_val -= 58
+                run_length += char_val * power
+                power *= 27
+                i += 1
+                if power > 27 ** 2:
+                    break
+            
+            # Set pixels
+            mask[current_pos:current_pos + run_length] = current_value
+            current_pos += run_length
+            current_value = 1 - current_value
+        
+        return mask.reshape((h, w))
+    else:
+        # List format
+        mask = np.zeros(h * w, dtype=np.uint8)
+        current_pos = 0
+        current_value = 0
+        for run_length in counts:
+            mask[current_pos:current_pos + run_length] = current_value
+            current_pos += run_length
+            current_value = 1 - current_value
+        return mask.reshape((h, w))
+
+
+def load_mask_from_json(json_path, image_id, image_shape):
     """
-    Load mask from JSON. Expects JSON with polygon/pixel-level annotations.
-    Adjust this based on your actual JSON structure.
+    Load mask from COCO JSON format for a specific image.
+    Creates a multi-class mask where each pixel has a class ID.
     """
     with open(json_path, 'r') as f:
-        annotations = json.load(f)
+        coco_data = json.load(f)
     
-    mask = np.zeros((image_shape[0], image_shape[1]), dtype=np.uint8)
+    h, w = image_shape[:2]
+    mask = np.ones((h, w), dtype=np.uint8) * 4  # Initialize with background (4)
     
-    # Example: iterate through annotations and fill mask
-    # ADJUST THIS BASED ON YOUR JSON STRUCTURE
-    for annotation in annotations:
-        class_name = annotation.get('class')
-        class_id = CLASS_MAPPING.get(class_name, 4)  # default to background
+    # Get all annotations for this image
+    for annotation in coco_data['annotations']:
+        if annotation['image_id'] != image_id:
+            continue
         
-        # If polygon format (list of [x, y] points)
-        if 'polygon' in annotation:
-            points = np.array(annotation['polygon'], dtype=np.int32)
-            cv2.fillPoly(mask, [points], class_id)
+        category_id = annotation['category_id']
         
-        # If bounding box format
-        elif 'bbox' in annotation:
-            x, y, w, h = annotation['bbox']
-            mask[y:y+h, x:x+w] = class_id
+        # Decode RLE segmentation
+        if 'segmentation' in annotation and 'counts' in annotation['segmentation']:
+            seg_mask = decode_rle(annotation['segmentation'], (h, w))
+            # Apply this object's mask
+            mask[seg_mask == 1] = category_id
+        
+        # Fallback: use polygon if available (for some annotations)
+        elif 'segmentation' in annotation and isinstance(annotation['segmentation'], list):
+            if len(annotation['segmentation']) > 0:
+                points = np.array(annotation['segmentation'][0], dtype=np.int32).reshape(-1, 2)
+                cv2.fillPoly(mask, [points], category_id)
     
     return mask
 
@@ -142,15 +194,18 @@ def build_segmentation_model(height, width, num_classes):
 # ============================================================================
 # STEP 4: PREPARE DATA
 # ============================================================================
-def prepare_data(original_image_path, json_mask_path, num_augmentations=20):
+def prepare_data(original_image_path, json_mask_path, image_id=0, num_augmentations=20):
     """Load image, mask, and augment"""
     
     # Load original image
     original_image = cv2.imread(original_image_path)
     original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
     
-    # Load mask from JSON
-    mask = load_mask_from_json(json_mask_path, original_image.shape[:2])
+    # Load mask from JSON for this specific image
+    mask = load_mask_from_json(json_mask_path, image_id, original_image.shape)
+    
+    print(f"Loaded image {image_id} with mask shape {mask.shape}")
+    print(f"Unique classes in mask: {np.unique(mask)}")
     
     # Augment
     aug_images, aug_masks = augment_image(original_image, mask, num_augmentations)
@@ -218,8 +273,6 @@ def calculate_ratios(mask_pred, exclude_background=True):
     flat_mask = mask_pred.flatten()
     unique, counts = np.unique(flat_mask, return_counts=True)
     
-    class_names_reverse = {v: k for k, v in CLASS_MAPPING.items()}
-    
     total_pixels = len(flat_mask)
     
     print("\n" + "="*60)
@@ -229,23 +282,24 @@ def calculate_ratios(mask_pred, exclude_background=True):
     # Calculate ratios
     ratios = {}
     for class_id, count in zip(unique, counts):
-        class_name = class_names_reverse.get(class_id, "unknown")
+        class_name = CLASS_MAPPING.get(class_id, "background")
         ratio = count / total_pixels
         ratios[class_name] = ratio
-        print(f"{class_name.upper():15} | Pixels: {count:8} | Ratio: {ratio*100:6.2f}%")
+        print(f"{class_name.upper():20} | Pixels: {count:8} | Ratio: {ratio*100:6.2f}%")
     
     # Exclude background if requested
     if exclude_background:
-        total_non_bg = total_pixels - ratios.get("background", 0) * total_pixels
+        bg_pixels = ratios.get("background", 0) * total_pixels
+        total_non_bg = total_pixels - bg_pixels
         print("\n--- Excluding Background ---")
         for class_name, ratio in ratios.items():
             if class_name != "background":
-                adjusted_ratio = (ratio * total_pixels) / total_non_bg
-                print(f"{class_name.upper():15} | Adjusted Ratio: {adjusted_ratio*100:6.2f}%")
+                adjusted_ratio = (ratio * total_pixels) / total_non_bg if total_non_bg > 0 else 0
+                print(f"{class_name.upper():20} | Adjusted Ratio: {adjusted_ratio*100:6.2f}%")
     
     # Potato vs Clutter ratio
-    potato_pixels = ratios.get("potato", 0) * total_pixels
-    clutter_pixels = (ratios.get("stick", 0) + ratios.get("rock", 0) + ratios.get("big_rock", 0)) * total_pixels
+    potato_pixels = ratios.get("potato-detection", 0) * total_pixels
+    clutter_pixels = (ratios.get("stick", 0) + ratios.get("Stone", 0) + ratios.get("big stone", 0)) * total_pixels
     
     if clutter_pixels > 0:
         potato_clutter_ratio = potato_pixels / clutter_pixels
@@ -255,7 +309,7 @@ def calculate_ratios(mask_pred, exclude_background=True):
         print(f"Ratio (Potato/Clutter): {potato_clutter_ratio:.2f}")
     else:
         print(f"\n--- Potato vs Clutter Ratio ---")
-        print(f"No clutter detected")
+        print(f"No clutter detected or insufficient data")
     
     print("="*60 + "\n")
     
@@ -270,11 +324,11 @@ if __name__ == "__main__":
     print("Starting Potato Segmentation Pipeline...")
     print(f"Image size: {IMAGE_WIDTH}x{IMAGE_HEIGHT}")
     print(f"Number of classes: {NUM_CLASSES}")
-    print(f"Classes: {list(CLASS_MAPPING.keys())}\n")
+    print(f"Classes: {list(CLASS_MAPPING.values())}\n")
     
     # Step 1: Load and augment data
-    print("Step 1: Loading image and mask...")
-    X, y_onehot, y_original = prepare_data(ORIGINAL_IMAGE_PATH, JSON_MASK_PATH, num_augmentations=20)
+    print("Step 1: Loading image and mask from COCO JSON...")
+    X, y_onehot, y_original = prepare_data(ORIGINAL_IMAGE_PATH, JSON_MASK_PATH, IMAGE_ID, num_augmentations=20)
     print(f"Generated {len(X)} training samples through augmentation\n")
     
     # Step 2: Train model
@@ -316,9 +370,9 @@ if __name__ == "__main__":
     mask_colored = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, 3), dtype=np.uint8)
     colors = {
         0: [255, 0, 0],      # stick - red
-        1: [0, 255, 0],      # rock - green
-        2: [0, 0, 255],      # big_rock - blue
-        3: [255, 255, 0],    # potato - yellow
+        1: [0, 255, 0],      # Stone - green
+        2: [0, 0, 255],      # big stone - blue
+        3: [255, 255, 0],    # potato-detection - yellow
         4: [128, 128, 128]   # background - gray
     }
     for class_id, color in colors.items():
@@ -329,11 +383,10 @@ if __name__ == "__main__":
     axes[1].axis('off')
     
     # Class distribution
-    class_names_reverse = {v: k for k, v in CLASS_MAPPING.items()}
-    class_names = [class_names_reverse[i] for i in range(NUM_CLASSES)]
+    class_names_list = [CLASS_MAPPING.get(i, "background") for i in range(NUM_CLASSES)]
     class_counts = [np.sum(predicted_mask == i) for i in range(NUM_CLASSES)]
     
-    axes[2].bar(class_names, class_counts)
+    axes[2].bar(class_names_list, class_counts)
     axes[2].set_title("Pixel Count by Class")
     axes[2].set_ylabel("Pixel Count")
     axes[2].tick_params(axis='x', rotation=45)
