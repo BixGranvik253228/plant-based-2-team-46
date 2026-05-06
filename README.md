@@ -9,3 +9,6 @@ https://app.roboflow.com/join/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ3b3Jrc3BhY
 240143436-101664__2025-10-02T193222-picture-2025-10-02T193222.jpg
 
 python3.8 scripts/create_symlinks.py
+
+bix wasn't here
+1234
